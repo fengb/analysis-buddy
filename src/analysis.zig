@@ -64,9 +64,9 @@ pub fn collectDocComments(
 pub fn getFunctionSignature(tree: *ast.Tree, func: *ast.Node.FnProto) []const u8 {
     const start = tree.token_locs[func.firstToken()].start;
     const end = tree.token_locs[switch (func.return_type) {
-        .Explicit, .InferErrorSet => |node| node.lastToken(),
-        .Invalid => |r_paren| r_paren,
-    }].end;
+            .Explicit, .InferErrorSet => |node| node.lastToken(),
+            .Invalid => |r_paren| r_paren,
+        }].end;
     return tree.source[start..end];
 }
 
@@ -544,20 +544,25 @@ pub fn resolveTypeOfNodeInternal(
     const node = node_handle.node;
     const handle = node_handle.handle;
 
+    const recur_frame = try arena.allocator.create(@Frame(resolveTypeOfNodeInternal));
+
     switch (node.tag) {
         .VarDecl => {
             const vari = node.castTag(.VarDecl).?;
+
             if (vari.getTypeNode()) |type_node| block: {
-                return ((try resolveTypeOfNodeInternal(
+                recur_frame.* = async resolveTypeOfNodeInternal(
                     store,
                     arena,
                     .{ .node = type_node, .handle = handle },
                     bound_type_params,
-                )) orelse break :block).instanceTypeVal();
+                );
+                return ((try await recur_frame) orelse break :block).instanceTypeVal();
             }
             const init_node = vari.getInitNode() orelse return null;
 
-            return try resolveTypeOfNodeInternal(store, arena, .{ .node = init_node, .handle = handle }, bound_type_params);
+            recur_frame.* = async resolveTypeOfNodeInternal(store, arena, .{ .node = init_node, .handle = handle }, bound_type_params);
+            return try await recur_frame;
         },
         .Identifier => {
             if (isTypeIdent(handle.tree, node.firstToken())) {
@@ -578,21 +583,23 @@ pub fn resolveTypeOfNodeInternal(
         },
         .ContainerField => {
             const field = node.castTag(.ContainerField).?;
-            return ((try resolveTypeOfNodeInternal(
+            recur_frame.* = async resolveTypeOfNodeInternal(
                 store,
                 arena,
                 .{ .node = field.type_expr orelse return null, .handle = handle },
                 bound_type_params,
-            )) orelse return null).instanceTypeVal();
+            );
+            return ((try await recur_frame) orelse return null).instanceTypeVal();
         },
         .Call => {
             const call = node.castTag(.Call).?;
-            const decl = (try resolveTypeOfNodeInternal(
+            recur_frame.* = async resolveTypeOfNodeInternal(
                 store,
                 arena,
                 .{ .node = call.lhs, .handle = handle },
                 bound_type_params,
-            )) orelse return null;
+            );
+            const decl = (try await recur_frame) orelse return null;
 
             if (decl.type.is_type_val) return null;
             const decl_node = switch (decl.type.data) {
@@ -619,10 +626,11 @@ pub fn resolveTypeOfNodeInternal(
                     };
                     if (!type_param) continue;
 
-                    const call_param_type = (try resolveTypeOfNodeInternal(store, arena, .{
+                    recur_frame.* = async resolveTypeOfNodeInternal(store, arena, .{
                         .node = call.paramsConst()[param_idx - has_self_param],
                         .handle = handle,
-                    }, bound_type_params)) orelse continue;
+                    }, bound_type_params);
+                    const call_param_type = (try await recur_frame) orelse continue;
                     if (!call_param_type.type.is_type_val) continue;
 
                     _ = try bound_type_params.put(decl_param, call_param_type);
@@ -634,38 +642,43 @@ pub fn resolveTypeOfNodeInternal(
         },
         .Comptime => {
             const ct = node.castTag(.Comptime).?;
-            return try resolveTypeOfNodeInternal(store, arena, .{ .node = ct.expr, .handle = handle }, bound_type_params);
+            recur_frame.* = async resolveTypeOfNodeInternal(store, arena, .{ .node = ct.expr, .handle = handle }, bound_type_params);
+            return try await recur_frame;
         },
         .GroupedExpression => {
             const grouped = node.castTag(.GroupedExpression).?;
-            return try resolveTypeOfNodeInternal(store, arena, .{ .node = grouped.expr, .handle = handle }, bound_type_params);
+            recur_frame.* = async resolveTypeOfNodeInternal(store, arena, .{ .node = grouped.expr, .handle = handle }, bound_type_params);
+            return try await recur_frame;
         },
         .StructInitializer => {
             const struct_init = node.castTag(.StructInitializer).?;
-            return ((try resolveTypeOfNodeInternal(
+            recur_frame.* = async resolveTypeOfNodeInternal(
                 store,
                 arena,
                 .{ .node = struct_init.lhs, .handle = handle },
                 bound_type_params,
-            )) orelse return null).instanceTypeVal();
+            );
+            return ((try await recur_frame) orelse return null).instanceTypeVal();
         },
         .ErrorSetDecl => {
             return TypeWithHandle.typeVal(node_handle);
         },
         .Slice => {
             const slice = node.castTag(.Slice).?;
-            const left_type = (try resolveTypeOfNodeInternal(store, arena, .{
+            recur_frame.* = async resolveTypeOfNodeInternal(store, arena, .{
                 .node = slice.lhs,
                 .handle = handle,
-            }, bound_type_params)) orelse return null;
+            }, bound_type_params);
+            const left_type = (try await recur_frame) orelse return null;
             return try resolveBracketAccessType(store, arena, left_type, .Range, bound_type_params);
         },
         .Deref, .UnwrapOptional => {
             const suffix = node.cast(ast.Node.SimpleSuffixOp).?;
-            const left_type = (try resolveTypeOfNodeInternal(store, arena, .{
+            recur_frame.* = async resolveTypeOfNodeInternal(store, arena, .{
                 .node = suffix.lhs,
                 .handle = handle,
-            }, bound_type_params)) orelse return null;
+            }, bound_type_params);
+            const left_type = (try await recur_frame) orelse return null;
             return switch (node.tag) {
                 .UnwrapOptional => try resolveUnwrapOptionalType(store, arena, left_type, bound_type_params),
                 .Deref => try resolveDerefType(store, arena, left_type, bound_type_params),
@@ -674,23 +687,25 @@ pub fn resolveTypeOfNodeInternal(
         },
         .ArrayAccess => {
             const arr_acc = node.castTag(.ArrayAccess).?;
-            const left_type = (try resolveTypeOfNodeInternal(store, arena, .{
+            recur_frame.* = async resolveTypeOfNodeInternal(store, arena, .{
                 .node = arr_acc.lhs,
                 .handle = handle,
-            }, bound_type_params)) orelse return null;
+            }, bound_type_params);
+            const left_type = (try await recur_frame) orelse return null;
             return try resolveBracketAccessType(store, arena, left_type, .Single, bound_type_params);
         },
         .Period => {
             const infix_op = node.cast(ast.Node.SimpleInfixOp).?;
             const rhs_str = nodeToString(handle.tree, infix_op.rhs) orelse return null;
             // If we are accessing a pointer type, remove one pointerness level :)
+            recur_frame.* = async resolveTypeOfNodeInternal(store, arena, .{
+                .node = infix_op.lhs,
+                .handle = handle,
+            }, bound_type_params);
             const left_type = try resolveFieldAccessLhsType(
                 store,
                 arena,
-                (try resolveTypeOfNodeInternal(store, arena, .{
-                    .node = infix_op.lhs,
-                    .handle = handle,
-                }, bound_type_params)) orelse return null,
+                (try await recur_frame) orelse return null,
                 bound_type_params,
             );
 
@@ -711,18 +726,20 @@ pub fn resolveTypeOfNodeInternal(
         },
         .OrElse => {
             const infix_op = node.cast(ast.Node.SimpleInfixOp).?;
-            const left_type = (try resolveTypeOfNodeInternal(store, arena, .{
+            recur_frame.* = async resolveTypeOfNodeInternal(store, arena, .{
                 .node = infix_op.lhs,
                 .handle = handle,
-            }, bound_type_params)) orelse return null;
+            }, bound_type_params);
+            const left_type = (try await recur_frame) orelse return null;
             return try resolveUnwrapOptionalType(store, arena, left_type, bound_type_params);
         },
         .Catch => {
             const infix_op = node.cast(ast.Node.Catch).?;
-            const left_type = (try resolveTypeOfNodeInternal(store, arena, .{
+            recur_frame.* = async resolveTypeOfNodeInternal(store, arena, .{
                 .node = infix_op.lhs,
                 .handle = handle,
-            }, bound_type_params)) orelse return null;
+            }, bound_type_params);
+            const left_type = (try await recur_frame) orelse return null;
             return try resolveUnwrapErrorType(store, arena, left_type, bound_type_params);
         },
         .ErrorUnion => return TypeWithHandle.typeVal(node_handle),
@@ -733,18 +750,20 @@ pub fn resolveTypeOfNodeInternal(
         => return TypeWithHandle.typeVal(node_handle),
         .Try => {
             const prefix_op = node.cast(ast.Node.SimplePrefixOp).?;
-            const rhs_type = (try resolveTypeOfNodeInternal(store, arena, .{
+            recur_frame.* = async resolveTypeOfNodeInternal(store, arena, .{
                 .node = prefix_op.rhs,
                 .handle = handle,
-            }, bound_type_params)) orelse return null;
+            }, bound_type_params);
+            const rhs_type = (try await recur_frame) orelse return null;
             return try resolveUnwrapErrorType(store, arena, rhs_type, bound_type_params);
         },
         .AddressOf => {
             const prefix_op = node.cast(ast.Node.SimplePrefixOp).?;
-            const rhs_type = (try resolveTypeOfNodeInternal(store, arena, .{
+            recur_frame.* = async resolveTypeOfNodeInternal(store, arena, .{
                 .node = prefix_op.rhs,
                 .handle = handle,
-            }, bound_type_params)) orelse return null;
+            }, bound_type_params);
+            const rhs_type = (try await recur_frame) orelse return null;
 
             const rhs_node = switch (rhs_type.type.data) {
                 .other => |n| n,
@@ -779,20 +798,22 @@ pub fn resolveTypeOfNodeInternal(
             });
             if (cast_map.has(call_name)) {
                 if (builtin_call.params_len < 1) return null;
-                return ((try resolveTypeOfNodeInternal(store, arena, .{
+                recur_frame.* = async resolveTypeOfNodeInternal(store, arena, .{
                     .node = builtin_call.paramsConst()[0],
                     .handle = handle,
-                }, bound_type_params)) orelse return null).instanceTypeVal();
+                }, bound_type_params);
+                return ((try await recur_frame) orelse return null).instanceTypeVal();
             }
 
             // Almost the same as the above, return a type value though.
             // TODO Do peer type resolution, we just keep the first for now.
             if (std.mem.eql(u8, call_name, "@TypeOf")) {
                 if (builtin_call.params_len < 1) return null;
-                var resolved_type = (try resolveTypeOfNodeInternal(store, arena, .{
+                recur_frame.* = async resolveTypeOfNodeInternal(store, arena, .{
                     .node = builtin_call.paramsConst()[0],
                     .handle = handle,
-                }, bound_type_params)) orelse return null;
+                }, bound_type_params);
+                var resolved_type = (try await recur_frame) orelse return null;
 
                 if (resolved_type.type.is_type_val) return null;
                 resolved_type.type.is_type_val = true;

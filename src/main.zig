@@ -5,6 +5,8 @@ const URI = @import("uri.zig");
 const ast = std.zig.ast;
 const builtins = @import("builtins.zig");
 
+pub const io_mode = .evented;
+
 pub fn getFieldAccessType(
     store: *DocumentStore,
     arena: *std.heap.ArenaAllocator,

@@ -238,7 +238,10 @@ fn newDocument(self: *DocumentStore, uri: []const u8, text: []u8) anyerror!*Hand
                 const build_file_uri = try URI.fromPath(self.allocator, candidate_path);
                 errdefer self.allocator.free(build_file_uri);
 
-                const build_file_handle = try self.newDocument(build_file_uri, build_file_text);
+                const recur_frame = try self.allocator.create(@Frame(newDocument));
+                defer self.allocator.destroy(recur_frame);
+                recur_frame.* = async self.newDocument(build_file_uri, build_file_text);
+                const build_file_handle = try await recur_frame;
 
                 if (build_file_handle.is_build_file) |build_file| {
                     build_file.refs += 1;
@@ -428,7 +431,6 @@ pub fn applyChanges(
                 .character = range.Object.get("end").?.Object.get("character").?.Integer,
             };
 
-
             const change_text = change.Object.get("text").?.String;
             const start_index = (try offsets.documentPosition(document.*, start_pos, offset_encoding)).absolute_index;
             const end_index = (try offsets.documentPosition(document.*, end_pos, offset_encoding)).absolute_index;
@@ -548,6 +550,8 @@ pub fn resolveImport(self: *DocumentStore, handle: *Handle, import_str: []const 
     const file_path = try URI.parse(allocator, final_uri);
     defer allocator.free(file_path);
 
+    // TODO: why is using a file considered recursive??
+    if (true) return error.Foo;
     var file = std.fs.cwd().openFile(file_path, .{}) catch {
         log.debug("Cannot open import file {}\n", .{file_path});
         return null;
